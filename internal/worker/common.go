@@ -5,10 +5,7 @@ import (
 	"time"
 
 	"github.com/MunifTanjim/stremthru/internal/kv"
-	"github.com/MunifTanjim/stremthru/internal/logger"
 )
-
-var log = logger.Scoped("worker")
 
 type IdQueue struct {
 	m            sync.Map
@@ -49,24 +46,16 @@ type JobTracker[T any] struct {
 
 func (t JobTracker[T]) Get(id string) (*Job[T], error) {
 	j := Job[T]{}
-	err := t.kv.Get(id, &j)
+	err := t.kv.GetValue(id, &j)
 	return &j, err
 }
 
-func (t JobTracker[T]) cleanup(fn func(id string, j *Job[T]) bool) error {
-	items, err := t.kv.List()
+func (t JobTracker[T]) GetLast() (*kv.ParsedKV[Job[T]], error) {
+	kv, err := t.kv.GetLast()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	for i := range items {
-		if fn(items[i].Key, &items[i].Value) {
-			err := t.kv.Del(items[i].Key)
-			if err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return kv, err
 }
 
 func (t JobTracker[T]) Set(id string, status string, err string, data *T) error {
@@ -83,15 +72,15 @@ func (t JobTracker[T]) IsRunning(id string) (bool, error) {
 	return j.Status == "started", err
 }
 
-func NewJobTracker[T any](name string, shouldClean func(id string, j *Job[T]) bool) JobTracker[T] {
+func NewJobTracker[T any](name string, expiresIn time.Duration) *JobTracker[T] {
 	tracker := JobTracker[T]{
 		kv: kv.NewKVStore[Job[T]](&kv.KVStoreConfig{
-			Type: "job:" + name,
+			Type:      "job:" + name,
+			ExpiresIn: expiresIn,
 		}),
 	}
-	err := tracker.cleanup(shouldClean)
-	if err != nil {
+	if _, err := tracker.kv.List(); err != nil {
 		panic(err)
 	}
-	return tracker
+	return &tracker
 }

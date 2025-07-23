@@ -67,6 +67,7 @@ var defaultValueByEnv = map[string]map[string]string{
 		"STREMTHRU_STORE_CLIENT_USER_AGENT":             "stremthru",
 		"STREMTHRU_INTEGRATION_ANILIST_LIST_STALE_TIME": "12h",
 		"STREMTHRU_INTEGRATION_MDBLIST_LIST_STALE_TIME": "12h",
+		"STREMTHRU_INTEGRATION_TMDB_LIST_STALE_TIME":    "12h",
 		"STREMTHRU_INTEGRATION_TRAKT_LIST_STALE_TIME":   "12h",
 	},
 }
@@ -530,7 +531,7 @@ var config = func() Config {
 		RedisURI:                    getEnv("STREMTHRU_REDIS_URI"),
 		DatabaseURI:                 databaseUri,
 		Feature:                     feature,
-		Version:                     "0.80.6", // x-release-please-version
+		Version:                     "0.81.2", // x-release-please-version
 		LandingPage:                 getEnv("STREMTHRU_LANDING_PAGE"),
 		ServerStartTime:             time.Now(),
 		StoreContentProxy:           storeContentProxyMap,
@@ -785,7 +786,7 @@ func PrintConfig(state *AppState) {
 	l.Println()
 
 	l.Println(" Integrations:")
-	for _, integration := range []string{"anilist.co", "kitsu.app", "mdblist.com", "trakt.tv"} {
+	for _, integration := range []string{"anilist.co", "github.com", "kitsu.app", "mdblist.com", "themoviedb.org", "trakt.tv"} {
 		switch integration {
 		case "anilist.co":
 			disabled := ""
@@ -796,6 +797,16 @@ func PrintConfig(state *AppState) {
 			if disabled == "" {
 				l.Println("       list stale time: " + Integration.AniList.ListStaleTime.String())
 			}
+		case "github.com":
+			disabled := ""
+			if !Integration.GitHub.HasDefaultCredentials() {
+				disabled = " (disabled)"
+			}
+			l.Println("   - " + integration + disabled)
+			if disabled == "" {
+				l.Println("                  user: " + Integration.GitHub.User)
+				l.Println("                 token: " + Integration.GitHub.Token[0:13] + "..." + Integration.GitHub.Token[len(Integration.GitHub.Token)-3:])
+			}
 		case "kitsu.app":
 			disabled := ""
 			if !Feature.IsEnabled(FeatureAnime) || !Integration.Kitsu.HasDefaultCredentials() {
@@ -804,10 +815,10 @@ func PrintConfig(state *AppState) {
 			l.Println("   - " + integration + disabled)
 			if disabled == "" {
 				if Integration.Kitsu.ClientId != "" {
-					l.Println("             client_id: " + Integration.Kitsu.ClientId[0:3] + "..." + Integration.Kitsu.ClientId[len(Integration.Trakt.ClientId)-3:])
+					l.Println("             client_id: " + Integration.Kitsu.ClientId[0:3] + "..." + Integration.Kitsu.ClientId[len(Integration.Kitsu.ClientId)-3:])
 				}
 				if Integration.Kitsu.ClientSecret != "" {
-					l.Println("         client_secret: " + Integration.Kitsu.ClientSecret[0:3] + "..." + Integration.Kitsu.ClientSecret[len(Integration.Trakt.ClientSecret)-3:])
+					l.Println("         client_secret: " + Integration.Kitsu.ClientSecret[0:3] + "..." + Integration.Kitsu.ClientSecret[len(Integration.Kitsu.ClientSecret)-3:])
 				}
 				l.Println("                 email: " + Integration.Kitsu.Email)
 				l.Println("              password: " + "*******")
@@ -815,6 +826,16 @@ func PrintConfig(state *AppState) {
 		case "mdblist.com":
 			l.Println("   - " + integration)
 			l.Println("       list stale time: " + Integration.MDBList.ListStaleTime.String())
+		case "themoviedb.org":
+			disabled := ""
+			if !Integration.TMDB.IsEnabled() {
+				disabled = " (disabled)"
+			}
+			l.Println("   - " + integration + disabled)
+			if disabled == "" {
+				l.Println("          access_token: " + Integration.TMDB.AccessToken[0:3] + "..." + Integration.TMDB.AccessToken[len(Integration.TMDB.AccessToken)-3:])
+				l.Println("       list stale time: " + Integration.TMDB.ListStaleTime.String())
+			}
 		case "trakt.tv":
 			disabled := ""
 			if !Integration.Trakt.IsEnabled() {

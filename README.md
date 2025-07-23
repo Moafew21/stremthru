@@ -234,9 +234,31 @@ so on first query it'll return less results, but it'll be faster.
 
 Stale time for list. e.g. `12h`.
 
+#### GitHub Integration
+
+##### `STREMTHRU_INTEGRATION_GITHUB_USER`
+
+GitHub username.
+
+##### `STREMTHRU_INTEGRATION_GITHUB_TOKEN`
+
+GitHub Personal Access Token.
+
 #### MDBList Integration
 
 ##### `STREMTHRU_INTEGRATION_MDBLIST_LIST_STALE_TIME`
+
+Stale time for list. e.g. `12h`.
+
+#### TMDB Integration
+
+TMDB integration needs an [Access Token](https://www.themoviedb.org/settings/api).
+
+##### `STREMTHRU_INTEGRATION_TMDB_ACCESS_TOKEN`
+
+API Read Access Token for TMDB.
+
+##### `STREMTHRU_INTEGRATION_TMDB_LIST_STALE_TIME`
 
 Stale time for list. e.g. `12h`.
 

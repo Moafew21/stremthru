@@ -14,8 +14,10 @@ import (
 	"github.com/MunifTanjim/stremthru/internal/imdb_title"
 	"github.com/MunifTanjim/stremthru/internal/mdblist"
 	"github.com/MunifTanjim/stremthru/internal/shared"
+	"github.com/MunifTanjim/stremthru/internal/tmdb"
 	"github.com/MunifTanjim/stremthru/internal/trakt"
 	"github.com/MunifTanjim/stremthru/stremio"
+	"github.com/alitto/pond/v2"
 )
 
 type ExtraData struct {
@@ -113,6 +115,200 @@ func getIMDBMetaFromMDBList(imdbIds []string, mdblistAPIKey string) (map[string]
 	return byId, nil
 }
 
+var tmdbMovieExternalIdsPool = pond.NewResultPool[*tmdb.GetMovieExternalIdsData](10)
+var tmdbShowExternalIdsPool = pond.NewResultPool[*tmdb.GetTVExternalIdsData](10)
+
+func getIMDBIdsForTMDBIds(tokenId string, tmdbMovieIds, tmdbShowIds []string) (map[string]string, map[string]string, error) {
+	movieImdbIdByTmdbId, showImdbIdByTmdbId, err := imdb_title.GetIMDBIdByTMDBId(tmdbMovieIds, tmdbShowIds)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var missingTMDBMovieIds, missingTMDBShowIds []string
+	if len(movieImdbIdByTmdbId) < len(tmdbMovieIds) {
+		missingTMDBMovieIds = make([]string, 0, len(tmdbMovieIds)-len(movieImdbIdByTmdbId))
+		for _, id := range tmdbMovieIds {
+			if _, ok := movieImdbIdByTmdbId[id]; !ok {
+				missingTMDBMovieIds = append(missingTMDBMovieIds, id)
+			}
+		}
+	}
+	if len(showImdbIdByTmdbId) < len(tmdbShowIds) {
+		missingTMDBShowIds = make([]string, 0, len(tmdbShowIds)-len(showImdbIdByTmdbId))
+		for _, id := range tmdbShowIds {
+			if _, ok := showImdbIdByTmdbId[id]; !ok {
+				missingTMDBShowIds = append(missingTMDBShowIds, id)
+			}
+		}
+	}
+
+	if len(missingTMDBMovieIds) > 0 || len(missingTMDBShowIds) > 0 {
+		log.Debug("fetching external ids for tmdb", "movie_count", len(missingTMDBMovieIds), "show_count", len(missingTMDBShowIds))
+		tmdbClient := tmdb.GetAPIClient(tokenId)
+		movieGroup := tmdbMovieExternalIdsPool.NewGroup()
+		for _, movieId := range missingTMDBMovieIds {
+			movieGroup.SubmitErr(func() (*tmdb.GetMovieExternalIdsData, error) {
+				res, err := tmdbClient.GetMovieExternalIds(&tmdb.GetMovieExternalIdsParams{
+					MovieId: movieId,
+				})
+				return &res.Data, err
+			})
+		}
+		showGroup := tmdbShowExternalIdsPool.NewGroup()
+		for _, showId := range missingTMDBShowIds {
+			showGroup.SubmitErr(func() (*tmdb.GetTVExternalIdsData, error) {
+				res, err := tmdbClient.GetTVExternalIds(&tmdb.GetTVExternalIdsParams{
+					SeriesId: showId,
+				})
+				return &res.Data, err
+			})
+		}
+
+		bulkRecordMappingItems := make([]imdb_title.BulkRecordMappingInputItem, 0, len(missingTMDBMovieIds)+len(missingTMDBShowIds))
+
+		movieExternalIds, err := movieGroup.Wait()
+		if err != nil {
+			log.Error("failed to fetch movie external ids from tmdb", "error", err)
+		}
+		for i, movieExternalId := range movieExternalIds {
+			if movieExternalId == nil || movieExternalId.IMDBId == "" {
+				continue
+			}
+			tmdbId := missingTMDBMovieIds[i]
+			movieImdbIdByTmdbId[tmdbId] = movieExternalId.IMDBId
+			bulkRecordMappingItems = append(bulkRecordMappingItems, imdb_title.BulkRecordMappingInputItem{
+				IMDBId: movieExternalId.IMDBId,
+				TMDBId: tmdbId,
+			})
+		}
+		showExternalIds, err := showGroup.Wait()
+		if err != nil {
+			log.Error("failed to fetch show external ids from tmdb", "error", err)
+		}
+		for i, showExternalId := range showExternalIds {
+			if showExternalId == nil || showExternalId.IMDBId == "" {
+				continue
+			}
+			tmdbId := missingTMDBShowIds[i]
+			showImdbIdByTmdbId[tmdbId] = showExternalId.IMDBId
+			bulkRecordMappingItems = append(bulkRecordMappingItems, imdb_title.BulkRecordMappingInputItem{
+				IMDBId: showExternalId.IMDBId,
+				TMDBId: tmdbId,
+				TVDBId: strconv.Itoa(showExternalId.TVDBId),
+			})
+		}
+
+		go imdb_title.BulkRecordMapping(bulkRecordMappingItems)
+	}
+
+	return movieImdbIdByTmdbId, showImdbIdByTmdbId, nil
+}
+
+var tmdbFindByIdPool = pond.NewResultPool[*tmdb.FindByIdData](10)
+
+func getTMDBIdsForIMDBIds(tokenId string, imdbIds []string) (map[string]string, error) {
+	tmdbIdByImdbId, err := imdb_title.GetTMDBIdByIMDBId(imdbIds)
+	if err != nil {
+		return nil, err
+	}
+
+	missingImdbIds := []string{}
+	for _, imdbId := range imdbIds {
+		if id, ok := tmdbIdByImdbId[imdbId]; !ok || id == "" {
+			missingImdbIds = append(missingImdbIds, imdbId)
+		}
+	}
+
+	if len(missingImdbIds) == 0 {
+		return tmdbIdByImdbId, nil
+	}
+
+	tmdbClient := tmdb.GetAPIClient(tokenId)
+
+	log.Debug("fetching tmdb ids for imdb ids", "count", len(missingImdbIds))
+
+	tmdbGroup := tmdbFindByIdPool.NewGroup()
+	for _, imdbId := range missingImdbIds {
+		tmdbGroup.SubmitErr(func() (*tmdb.FindByIdData, error) {
+			res, err := tmdbClient.FindById(&tmdb.FindByIdParams{
+				ExternalSource: "imdb_id",
+				ExternalId:     imdbId,
+			})
+			return &res.Data, err
+		})
+	}
+
+	results, err := tmdbGroup.Wait()
+	if err != nil {
+		log.Error("failed to fetch tmdb ids for imdb ids", "error", err)
+	}
+	newMappings := make([]imdb_title.BulkRecordMappingInputItem, 0, len(missingImdbIds))
+	tmdbItems := make([]tmdb.TMDBItem, 0, len(missingImdbIds))
+	for i, result := range results {
+		if result == nil {
+			continue
+		}
+		imdbId := missingImdbIds[i]
+		if movie := result.Movie(); movie != nil {
+			tmdbId := strconv.Itoa(movie.Id)
+			tmdbIdByImdbId[imdbId] = tmdbId
+			newMappings = append(newMappings, imdb_title.BulkRecordMappingInputItem{
+				IMDBId: imdbId,
+				TMDBId: tmdbId,
+			})
+			tmdbItems = append(tmdbItems, tmdb.TMDBItem{
+				Id:            movie.Id,
+				Type:          tmdb.MediaTypeMovie,
+				IsPartial:     true,
+				Title:         movie.Title,
+				OriginalTitle: movie.OriginalTitle,
+				Overview:      movie.Overview,
+				ReleaseDate:   db.DateOnly{Time: movie.GetReleaseDate()},
+				IsAdult:       movie.Adult,
+				Backdrop:      movie.BackdropPath,
+				Poster:        movie.PosterPath,
+				Popularity:    movie.Popularity,
+				VoteAverage:   movie.VoteAverage,
+				VoteCount:     movie.VoteCount,
+				Genres:        movie.GenreIds,
+			})
+		} else if show := result.Show(); show != nil {
+			tmdbId := strconv.Itoa(show.Id)
+			tmdbIdByImdbId[imdbId] = tmdbId
+			newMappings = append(newMappings, imdb_title.BulkRecordMappingInputItem{
+				IMDBId: imdbId,
+				TMDBId: tmdbId,
+			})
+			tmdbItems = append(tmdbItems, tmdb.TMDBItem{
+				Id:            show.Id,
+				Type:          tmdb.MediaTypeTVShow,
+				IsPartial:     true,
+				Title:         show.Name,
+				OriginalTitle: show.OriginalName,
+				Overview:      show.Overview,
+				ReleaseDate:   db.DateOnly{Time: show.GetFirstAirDate()},
+				IsAdult:       show.Adult,
+				Backdrop:      show.BackdropPath,
+				Poster:        show.PosterPath,
+				Popularity:    show.Popularity,
+				VoteAverage:   show.VoteAverage,
+				VoteCount:     show.VoteCount,
+				Genres:        show.GenreIds,
+			})
+		}
+	}
+
+	go imdb_title.BulkRecordMapping(newMappings)
+	go func() {
+		err := tmdb.UpsertItems(db.GetDB(), tmdbItems)
+		if err != nil {
+			log.Error("failed to upsert tmdb items", "error", err)
+		}
+	}()
+
+	return tmdbIdByImdbId, nil
+}
+
 type catalogItem struct {
 	stremio.MetaPreview
 	item any
@@ -192,6 +388,40 @@ func handleCatalog(w http.ResponseWriter, r *http.Request) {
 			catalogItems = append(catalogItems, catalogItem{meta, item})
 		}
 
+	case "tmdb":
+		list := tmdb.TMDBList{Id: id}
+		if err := ud.FetchTMDBList(&list); err != nil {
+			SendError(w, r, err)
+			return
+		}
+
+		for i := range list.Items {
+			item := &list.Items[i]
+			meta := stremio.MetaPreview{
+				Name:        item.Title,
+				Description: item.Overview,
+				Poster:      item.PosterURL(tmdb.PosterSizeW500),
+				PosterShape: stremio.MetaPosterShapePoster,
+				Genres:      item.GenreNames(),
+				ReleaseInfo: item.ReleaseDate.Format("2006"),
+			}
+			switch item.Type {
+			case tmdb.MediaTypeMovie:
+				meta.Type = stremio.ContentTypeMovie
+				if ud.MetaIdMovie == "tmdb" {
+					meta.Id = "tmdb:" + strconv.Itoa(item.Id)
+				}
+			case tmdb.MediaTypeTVShow:
+				meta.Type = stremio.ContentTypeSeries
+				if ud.MetaIdSeries == "tmdb" {
+					meta.Id = "tmdb:" + strconv.Itoa(item.Id)
+				}
+			default:
+				continue
+			}
+			catalogItems = append(catalogItems, catalogItem{meta, item})
+		}
+
 	case "trakt":
 		list := trakt.TraktList{Id: id}
 		if err := ud.FetchTraktList(&list); err != nil {
@@ -263,7 +493,7 @@ func handleCatalog(w http.ResponseWriter, r *http.Request) {
 			item := &catalogItems[i]
 			medias[i] = item.item.(anilist.AniListMedia)
 		}
-		if err := anilist.EnsureIdMap(medias); err != nil {
+		if err := anilist.EnsureIdMap(medias, id); err != nil {
 			SendError(w, r, err)
 			return
 		}
@@ -314,6 +544,53 @@ func handleCatalog(w http.ResponseWriter, r *http.Request) {
 			items = append(items, item.MetaPreview)
 		}
 
+	case "tmdb":
+		tmdbMovieIds := make([]string, 0, len(catalogItems))
+		tmdbShowIds := make([]string, 0, len(catalogItems))
+		for i := range catalogItems {
+			item := catalogItems[i].item.(*tmdb.TMDBItem)
+			switch item.Type {
+			case tmdb.MediaTypeMovie:
+				tmdbMovieIds = append(tmdbMovieIds, strconv.Itoa(item.Id))
+			case tmdb.MediaTypeTVShow:
+				tmdbShowIds = append(tmdbShowIds, strconv.Itoa(item.Id))
+			}
+		}
+
+		movieImdbIdByTmdbId, showImdbIdByTmdbId, err := getIMDBIdsForTMDBIds(ud.TMDBTokenId, tmdbMovieIds, tmdbShowIds)
+		if err != nil {
+			SendError(w, r, err)
+			return
+		}
+
+		for i := range catalogItems {
+			item := &catalogItems[i]
+			titem := item.item.(*tmdb.TMDBItem)
+			imdbId := ""
+			switch titem.Type {
+			case tmdb.MediaTypeMovie:
+				if id, ok := movieImdbIdByTmdbId[strconv.Itoa(titem.Id)]; ok {
+					imdbId = id
+				}
+			case tmdb.MediaTypeTVShow:
+				if id, ok := showImdbIdByTmdbId[strconv.Itoa(titem.Id)]; ok {
+					imdbId = id
+				}
+			}
+			if imdbId == "" && item.MetaPreview.Id == "" {
+				continue
+			}
+
+			if item.MetaPreview.Id == "" {
+				item.MetaPreview.Id = imdbId
+			}
+			if rpdbPosterBaseUrl != "" {
+				item.MetaPreview.Poster = rpdbPosterBaseUrl + imdbId + ".jpg?fallback=true"
+			}
+
+			items = append(items, item.MetaPreview)
+		}
+
 	case "trakt":
 		traktMovieIds := make([]string, 0, len(catalogItems))
 		traktShowIds := make([]string, 0, len(catalogItems))
@@ -357,6 +634,37 @@ func handleCatalog(w http.ResponseWriter, r *http.Request) {
 			}
 
 			items = append(items, item.MetaPreview)
+		}
+	}
+
+	imdbIdsToFindTmdbIds := []string{}
+	if ud.MetaIdMovie != "" || ud.MetaIdSeries != "" {
+		for _, item := range items {
+			if strings.HasPrefix(item.Id, "tt") {
+				switch item.Type {
+				case stremio.ContentTypeMovie:
+					if ud.MetaIdMovie == "tmdb" {
+						imdbIdsToFindTmdbIds = append(imdbIdsToFindTmdbIds, item.Id)
+					}
+				case stremio.ContentTypeSeries:
+					if ud.MetaIdSeries == "tmdb" {
+						imdbIdsToFindTmdbIds = append(imdbIdsToFindTmdbIds, item.Id)
+					}
+				}
+			}
+		}
+	}
+	if len(imdbIdsToFindTmdbIds) > 0 {
+		tmdbIdByImdbId, err := getTMDBIdsForIMDBIds(ud.TMDBTokenId, imdbIdsToFindTmdbIds)
+		if err != nil {
+			log.Error("failed to fetch tmdb ids for imdb ids", "error", err, "count", len(imdbIdsToFindTmdbIds))
+		} else {
+			for i := range items {
+				item := &items[i]
+				if tmdbId, ok := tmdbIdByImdbId[item.Id]; ok && tmdbId != "" {
+					item.Id = "tmdb:" + tmdbId
+				}
+			}
 		}
 	}
 

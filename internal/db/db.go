@@ -24,6 +24,7 @@ var BooleanTrue string
 var CurrentTimestamp string
 var FnJSONGroupArray string
 var FnJSONObject string
+var NewAdvisoryLock func(names ...string) AdvisoryLock
 
 var connUri, dsnModifiers = func() (ConnectionURI, []DSNModifier) {
 	uri, err := ParseConnectionURI(config.DatabaseURI)
@@ -41,6 +42,7 @@ var connUri, dsnModifiers = func() (ConnectionURI, []DSNModifier) {
 		CurrentTimestamp = "unixepoch()"
 		FnJSONGroupArray = "json_group_array"
 		FnJSONObject = "json_object"
+		NewAdvisoryLock = sqliteNewAdvisoryLock
 
 		dsnModifiers = append(dsnModifiers, func(u *url.URL, q *url.Values) {
 			u.Scheme = "file"
@@ -51,6 +53,7 @@ var connUri, dsnModifiers = func() (ConnectionURI, []DSNModifier) {
 		CurrentTimestamp = "current_timestamp"
 		FnJSONGroupArray = "json_agg"
 		FnJSONObject = "json_build_object"
+		NewAdvisoryLock = postgresNewAdvisoryLock
 	default:
 		log.Fatalf("[db] unsupported dialect: %v\n", Dialect)
 	}
@@ -59,8 +62,12 @@ var connUri, dsnModifiers = func() (ConnectionURI, []DSNModifier) {
 }()
 
 type dbExec func(query string, args ...any) (sql.Result, error)
+type dbQuery func(query string, args ...any) (*sql.Rows, error)
+type dbQueryRow func(query string, args ...any) *sql.Row
 type Executor interface {
 	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
 }
 
 var getExec = func(db Executor) dbExec {
@@ -96,6 +103,26 @@ func QueryRow(query string, args ...any) *sql.Row {
 	return db.QueryRow(adaptQuery(query), args...)
 }
 
+type dbExecutor struct{}
+
+func (e dbExecutor) Exec(query string, args ...any) (sql.Result, error) {
+	return Exec(query, args...)
+}
+
+func (e dbExecutor) Query(query string, args ...any) (*sql.Rows, error) {
+	return Query(query, args...)
+}
+
+func (e dbExecutor) QueryRow(query string, args ...any) *sql.Row {
+	return QueryRow(query, args...)
+}
+
+var execturor = dbExecutor{}
+
+func GetDB() *dbExecutor {
+	return &execturor
+}
+
 type Tx struct {
 	tx   *sql.Tx
 	exec dbExec
@@ -107,6 +134,14 @@ func (tx *Tx) Commit() error {
 
 func (tx *Tx) Exec(query string, args ...any) (sql.Result, error) {
 	return tx.exec(query, args...)
+}
+
+func (tx *Tx) Query(query string, args ...any) (*sql.Rows, error) {
+	return tx.tx.Query(adaptQuery(query), args...)
+}
+
+func (tx *Tx) QueryRow(query string, args ...any) *sql.Row {
+	return tx.tx.QueryRow(adaptQuery(query), args...)
 }
 
 func (tx *Tx) Rollback() error {
@@ -138,7 +173,7 @@ func Open() *DB {
 	if err != nil {
 		log.Fatalf("[db] failed to open: %v\n", err)
 	}
-	*db = *&DB{
+	*db = DB{
 		DB:  database,
 		URI: connUri,
 	}
