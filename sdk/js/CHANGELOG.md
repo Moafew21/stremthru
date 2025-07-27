@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.0](https://github.com/MunifTanjim/stremthru/compare/sdk-js-0.7.0...sdk-js-0.8.0) (2025-07-25)
+
+
+### Features
+
+* **sdk/js:** add video_hash for files ([a08908a](https://github.com/MunifTanjim/stremthru/commit/a08908a54ba6f2aa89dbb4e3a1e0cda3a6998889))
+* **sdk/js:** replace deprecated authorization header ([ae488a2](https://github.com/MunifTanjim/stremthru/commit/ae488a26b8482a9f0183dd79e25466eb81392ac0))
+
 ## [0.7.0](https://github.com/MunifTanjim/stremthru/compare/sdk-js-0.6.0...sdk-js-0.7.0) (2024-12-31)
 
 
