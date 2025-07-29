@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/MunifTanjim/stremthru/internal/util"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 type PaginatedResult[T any] struct {
@@ -330,7 +331,11 @@ type dynamicListMeta struct {
 	Endpoint  string
 	Name      string
 	MediaType MediaType
+	SortBy    string
 	Public    bool
+
+	NeedAccountObjectId bool
+	IsV4                bool
 }
 
 func (m dynamicListMeta) fetchPage(client *APIClient, page int, pageSize int) (items []ListItem, totalPages, totalResults int, err error) {
@@ -339,6 +344,32 @@ func (m dynamicListMeta) fetchPage(client *APIClient, page int, pageSize int) (i
 	params.Query = &url.Values{
 		"page": []string{strconv.Itoa(page)},
 	}
+	if m.SortBy != "" {
+		params.Query.Set("sort_by", m.SortBy)
+	}
+
+	if m.IsV4 {
+		response := fetchListData[ListItem]{}
+		endpoint := m.Endpoint
+		if m.NeedAccountObjectId {
+			if token, err := client.OAuth.TokenSource.Token(); err != nil {
+				return nil, totalPages, totalResults, err
+			} else if t, _, err := jwt.NewParser().ParseUnverified(token.AccessToken, jwt.MapClaims{}); err != nil {
+				return nil, totalPages, totalResults, err
+			} else if sub, err := t.Claims.GetSubject(); err != nil {
+				return nil, totalPages, totalResults, err
+			} else {
+				endpoint = strings.ReplaceAll(endpoint, "{account_object_id}", sub)
+			}
+		}
+		_, err := client.Request("GET", endpoint, params, &response)
+		if err != nil {
+			return nil, totalPages, totalResults, err
+		}
+		totalPages, totalResults = response.TotalPages, response.TotalResults
+		return response.Results, totalPages, totalResults, nil
+	}
+
 	items = make([]ListItem, 0, pageSize)
 	switch m.MediaType {
 	case MediaTypeMovie:
@@ -432,41 +463,51 @@ var dynamicListMetaById = map[string]dynamicListMeta{
 		Endpoint:  "/3/account/0/favorite/movies",
 		Name:      "Favorites",
 		MediaType: MediaTypeMovie,
+		SortBy:    "created_at.desc",
 	},
 	"favorites/tv": {
 		Endpoint:  "/3/account/0/favorite/tv",
 		Name:      "Favorites",
 		MediaType: MediaTypeTVShow,
+		SortBy:    "created_at.desc",
 	},
 	"ratings/movie": {
 		Endpoint:  "/3/account/0/rated/movies",
 		Name:      "Ratings",
 		MediaType: MediaTypeMovie,
+		SortBy:    "created_at.desc",
 	},
 	"ratings/tv": {
 		Endpoint:  "/3/account/0/rated/tv",
 		Name:      "Ratings",
 		MediaType: MediaTypeTVShow,
+		SortBy:    "created_at.desc",
 	},
 	"recommendations/movie": {
-		Endpoint:  "/3/account/0/recommendations/movies",
-		Name:      "Recommendations",
-		MediaType: MediaTypeMovie,
+		Endpoint:            "/4/account/{account_object_id}/movie/recommendations",
+		Name:                "Recommendations",
+		MediaType:           MediaTypeMovie,
+		NeedAccountObjectId: true,
+		IsV4:                true,
 	},
 	"recommendations/tv": {
-		Endpoint:  "/3/account/0/recommendations/tv",
-		Name:      "Recommendations",
-		MediaType: MediaTypeTVShow,
+		Endpoint:            "/4/account/{account_object_id}/tv/recommendations",
+		Name:                "Recommendations",
+		MediaType:           MediaTypeTVShow,
+		NeedAccountObjectId: true,
+		IsV4:                true,
 	},
 	"watchlist/movie": {
 		Endpoint:  "/3/account/0/watchlist/movies",
 		Name:      "Watchlist",
 		MediaType: MediaTypeMovie,
+		SortBy:    "created_at.desc",
 	},
 	"watchlist/tv": {
 		Endpoint:  "/3/account/0/watchlist/tv",
 		Name:      "Watchlist",
 		MediaType: MediaTypeTVShow,
+		SortBy:    "created_at.desc",
 	},
 	"movie": {
 		Endpoint:  "/3/movie/popular",
